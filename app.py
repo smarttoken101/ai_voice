@@ -14,19 +14,15 @@ import queue
 import threading
 import time
 from pathlib import Path
-import pygame
 import json
 
 # Configure API key
-GOOGLE_API_KEY = "AIzaSyAHDkUV3JJyuVRSPwyXjlcQ97QbSUmyOqM"  # Replace with your API key
+GOOGLE_API_KEY = "AIzaSyAHDkUV3JJyuVRSPwyXjlcQ97QbSUmyOqM"
 genai.configure(api_key=GOOGLE_API_KEY)
 
 # Set up the models
 text_model = genai.GenerativeModel('gemini-pro')
 vision_model = genai.GenerativeModel('gemini-pro-vision')
-
-# Initialize pygame mixer for better audio playback
-pygame.mixer.init()
 
 class AudioProcessor:
     def __init__(self):
