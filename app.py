@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 # Configure API key
-GOOGLE_API_KEY = "AIzaSyAHDkUV3JJyuVRSPwyXjlcQ97QbSUmyOqM"
+GOOGLE_API_KEY = "AIzaSyAHDkUV3JJyuVRSPwyXjlcQ97QbSUmyOqM"112
 genai.configure(api_key=GOOGLE_API_KEY)
 
 # Set up the models
