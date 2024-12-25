@@ -6,101 +6,193 @@ import speech_recognition as sr
 from gtts import gTTS
 import os
 import tempfile
-from streamlit_webrtc import webrtc_streamer
+from streamlit_webrtc import webrtc_streamer, WebRtcMode
 import cv2
 import numpy as np
+import av
+import queue
+import threading
 import time
 from pathlib import Path
+import pygame
+import json
 
 # Configure API key
-GOOGLE_API_KEY = "AIzaSyAHDkUV3JJyuVRSPwyXjlcQ97QbSUmyOqM"
+GOOGLE_API_KEY = "AIzaSyAHDkUV3JJyuVRSPwyXjlcQ97QbSUmyOqM"  # Replace with your API key
 genai.configure(api_key=GOOGLE_API_KEY)
 
 # Set up the models
 text_model = genai.GenerativeModel('gemini-pro')
 vision_model = genai.GenerativeModel('gemini-pro-vision')
 
-def text_to_speech(text):
-    tts = gTTS(text=text, lang='en')
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as fp:
-        tts.save(fp.name)
-        return fp.name
+# Initialize pygame mixer for better audio playback
+pygame.mixer.init()
 
-def speech_to_text():
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
-        st.write("Listening... Speak now!")
-        audio = r.listen(source)
+class AudioProcessor:
+    def __init__(self):
+        self.recognizer = sr.Recognizer()
+        self.audio_queue = queue.Queue()
+        self.result_queue = queue.Queue()
+        self.is_listening = False
+        
+    def start_listening(self):
+        self.is_listening = True
+        threading.Thread(target=self._listen_loop, daemon=True).start()
+        
+    def stop_listening(self):
+        self.is_listening = False
+        
+    def _listen_loop(self):
+        while self.is_listening:
+            try:
+                with sr.Microphone() as source:
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                    audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=10)
+                    self.audio_queue.put(audio)
+            except sr.WaitTimeoutError:
+                continue
+            except Exception as e:
+                st.error(f"Error in audio capture: {str(e)}")
+                continue
+
+class VideoProcessor:
+    def __init__(self):
+        self.vision_model = vision_model
+        self.frame_skip = 30
+        self.frame_count = 0
+        self.last_response = None
+        self.frame_queue = queue.Queue(maxsize=10)
+        self.is_processing = False
+        
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        self.frame_count += 1
+        
+        if self.frame_count % self.frame_skip == 0:
+            if not self.is_processing:
+                self.is_processing = True
+                threading.Thread(target=self._process_frame, args=(img.copy(),), daemon=True).start()
+        
+        if self.last_response:
+            img = self._annotate_frame(img, self.last_response)
+            
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+    
+    def _process_frame(self, img):
         try:
-            text = r.recognize_google(audio)
-            return text
-        except sr.UnknownValueError:
-            return "Could not understand audio"
-        except sr.RequestError:
-            return "Could not request results"
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(img_rgb)
+            
+            response = vision_model.generate_content([
+                "Describe what you see in this image briefly and naturally.",
+                pil_image
+            ])
+            self.last_response = response.text
+        except Exception as e:
+            st.error(f"Error in vision processing: {str(e)}")
+        finally:
+            self.is_processing = False
+    
+    def _annotate_frame(self, img, text):
+        h, w = img.shape[:2]
+        overlay = img.copy()
+        cv2.rectangle(overlay, (0, h-100), (w, h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.5, img, 0.5, 0, img)
+        cv2.putText(img, text[:100], (10, h-30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        return img
 
-def get_gemini_response(input_text, image=None):
-    if image:
-        response = vision_model.generate_content([input_text, image])
-    else:
-        response = text_model.generate_content(input_text)
-    return response.text
+def text_to_speech(text):
+    try:
+        tts = gTTS(text=text, lang='en')
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as fp:
+            tts.save(fp.name)
+            return fp.name
+    except Exception as e:
+        st.error(f"Error in text-to-speech: {str(e)}")
+        return None
+
+def process_audio_to_text(audio_data):
+    try:
+        text = sr.Recognizer().recognize_google(audio_data)
+        return text
+    except sr.UnknownValueError:
+        return None
+    except Exception as e:
+        st.error(f"Error in speech recognition: {str(e)}")
+        return None
+
+def get_ai_response(input_text, image=None):
+    try:
+        if image:
+            response = vision_model.generate_content([input_text, image])
+        else:
+            response = text_model.generate_content(input_text)
+        return response.text
+    except Exception as e:
+        st.error(f"Error getting AI response: {str(e)}")
+        return None
+
+# Initialize session state
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+if 'audio_processor' not in st.session_state:
+    st.session_state.audio_processor = AudioProcessor()
 
 # Streamlit UI
-st.title("🤖 Gemini AI Assistant")
-st.write("Chat with AI using text, voice, or camera!")
+st.title("🤖 Advanced AI Assistant")
+st.write("Interactive AI powered by Google Gemini 2.0")
 
-# Create tabs for different modes
-tab1, tab2, tab3 = st.tabs(["💭 Text Chat", "🎤 Voice Chat", "📸 Camera Chat"])
+# Chat interface
+chat_container = st.container()
+with chat_container:
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
 
-with tab1:
-    st.subheader("Text Chat")
-    user_input = st.text_area("Your message:", key="text_input")
+# Input section
+input_container = st.container()
+with input_container:
+    # Text input
+    if prompt := st.chat_input("Type your message here..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        response = get_ai_response(prompt)
+        if response:
+            st.session_state.messages.append({"role": "assistant", "content": response})
+            # Auto-play response
+            audio_file = text_to_speech(response)
+            if audio_file:
+                st.audio(audio_file, format='audio/mp3')
+
+    # Voice input controls
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Send", key="send_text"):
-            if user_input:
-                response = get_gemini_response(user_input)
-                st.write("AI Response:")
-                st.write(response)
-                # Convert response to speech
+        if st.button("🎤 Start Voice Chat", key="start_voice"):
+            st.session_state.audio_processor.start_listening()
+            st.info("Listening... Speak now!")
+    with col2:
+        if st.button("⏹️ Stop Voice Chat", key="stop_voice"):
+            st.session_state.audio_processor.stop_listening()
+            st.info("Stopped listening.")
+
+    # Process any audio in the queue
+    if not st.session_state.audio_processor.audio_queue.empty():
+        audio_data = st.session_state.audio_processor.audio_queue.get()
+        text = process_audio_to_text(audio_data)
+        if text:
+            st.session_state.messages.append({"role": "user", "content": f"🎤 {text}"})
+            response = get_ai_response(text)
+            if response:
+                st.session_state.messages.append({"role": "assistant", "content": response})
                 audio_file = text_to_speech(response)
-                st.audio(audio_file)
+                if audio_file:
+                    st.audio(audio_file, format='audio/mp3')
 
-with tab2:
-    st.subheader("Voice Chat")
-    if st.button("🎤 Start Recording", key="record"):
-        user_input = speech_to_text()
-        if user_input:
-            st.write("You said:", user_input)
-            response = get_gemini_response(user_input)
-            st.write("AI Response:")
-            st.write(response)
-            # Convert response to speech
-            audio_file = text_to_speech(response)
-            st.audio(audio_file)
-
-with tab3:
-    st.subheader("Camera Chat")
-    webrtc_ctx = webrtc_streamer(
-        key="camera",
-        video_frame_callback=None,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-        media_stream_constraints={"video": True, "audio": False},
-    )
-    
-    if st.button("Capture Image"):
-        if webrtc_ctx.video_receiver:
-            image = webrtc_ctx.video_receiver.get_frame()
-            if image is not None:
-                st.image(image, caption="Captured Image", use_column_width=True)
-                
-                image_prompt = st.text_area("Ask something about the image:", key="live_image_prompt")
-                if st.button("Analyze", key="analyze_live_image"):
-                    if image_prompt:
-                        response = get_gemini_response(image_prompt, image)
-                        st.write("AI Response:")
-                        st.write(response)
-                        # Convert response to speech
-                        audio_file = text_to_speech(response)
-                        st.audio(audio_file)
+# Camera section
+st.subheader("📸 Camera Interaction")
+webrtc_ctx = webrtc_streamer(
+    key="gemini-camera",
+    video_processor_factory=VideoProcessor,
+    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
+)

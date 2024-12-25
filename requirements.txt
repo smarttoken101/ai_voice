@@ -6,3 +6,5 @@ gtts
 streamlit-webrtc
 opencv-python-headless
 numpy
+av
+pygame
